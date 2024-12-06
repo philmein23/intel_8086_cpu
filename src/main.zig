@@ -1,10 +1,71 @@
 const std = @import("std");
 
 const Instruction = struct {
+    mneumonic: Mneumonic,
     op_code: OpCode,
     operands: [2]Operand,
 
-    pub fn set_reg_field_encoding(w_bit: u8, register_operand: u8) !Register {
+    pub fn generate_reg_rm_instruct(self: *Instruction, w_bit: u8, d_bit: u8, reg_bits: u8, rm_bits: u8, displacement_byte: ?u16) !void {
+        var op_reg = Operand{ .register = undefined };
+        op_reg.register = try Instruction.from_reg_bits(w_bit, reg_bits);
+
+        var op_rm = Operand{ .memory = undefined };
+
+        const disp_byte = if (displacement_byte != null) @as(u16, displacement_byte.?) else null;
+        switch (rm_bits) {
+            0b00000000 => {
+                op_rm.memory.p1 = .bx;
+                op_rm.memory.p2 = .si;
+                op_rm.memory.displacement = disp_byte;
+            },
+            0b00000001 => {
+                op_rm.memory.p1 = .bx;
+                op_rm.memory.p2 = .di;
+                op_rm.memory.displacement = disp_byte;
+            },
+            0b00000010 => {
+                op_rm.memory.p1 = .bp;
+                op_rm.memory.p2 = .si;
+                op_rm.memory.displacement = disp_byte;
+            },
+            0b00000011 => {
+                op_rm.memory.p1 = .bp;
+                op_rm.memory.p2 = .di;
+                op_rm.memory.displacement = disp_byte;
+            },
+            0b00000100 => {
+                op_rm.memory.p1 = .si;
+                op_rm.memory.p2 = null;
+                op_rm.memory.displacement = disp_byte;
+            },
+            0b00000101 => {
+                op_rm.memory.p1 = .di;
+                op_rm.memory.p2 = null;
+                op_rm.memory.displacement = disp_byte;
+            },
+            0b00000110 => {
+                op_rm.memory.p1 = .bp;
+                op_rm.memory.p2 = null;
+                op_rm.memory.displacement = disp_byte;
+            },
+            0b00000111 => {
+                op_rm.memory.p1 = .bx;
+                op_rm.memory.p2 = null;
+                op_rm.memory.displacement = disp_byte;
+            },
+            else => return error.UnknownRMRegisterBits,
+        }
+
+        if (d_bit == 0b00000000) {
+            self.operands[0] = op_rm;
+            self.operands[1] = op_reg;
+        } else {
+            self.operands[0] = op_reg;
+            self.operands[1] = op_rm;
+        }
+    }
+
+    pub fn from_reg_bits(w_bit: u8, register_operand: u8) !Register {
         switch (register_operand) {
             0b00000000 => {
                 return if (w_bit == 0b00000000) .al else .ax;
@@ -36,29 +97,22 @@ const Instruction = struct {
         }
     }
 
-    const OpCode = enum(u6) {
-        mov,
+    const Mneumonic = enum { mov, none };
+
+    const OpCode = enum(u8) {
+        reg_rm,
+        imm,
+        accum,
         no_op,
 
-        pub fn from_binary(bin: u6) OpCode {
+        pub fn from_binary(bin: u8) OpCode {
             switch (bin) {
-                0b100010 => {
-                    std.debug.print("Reg-to-reg OPCODE:      0b{b:0>6}\n", .{bin});
-                    return .mov;
+                0b00100010 => {
+                    std.debug.print("R/M to/from REG OPCODE:      0b{b:0>6}\n", .{bin});
+                    return .reg_rm;
                 },
                 else => {
                     return .no_op;
-                },
-            }
-        }
-
-        pub fn to_str(self: OpCode) []const u8 {
-            switch (self) {
-                .mov => {
-                    return "mov";
-                },
-                else => {
-                    return "nada";
                 },
             }
         }
@@ -66,14 +120,30 @@ const Instruction = struct {
 
     pub fn format(self: *Instruction) ![]const u8 {
         switch (self.op_code) {
-            .mov => {
+            .reg_rm => {
                 var buf: [32]u8 = undefined;
+                var buf2: [32]u8 = undefined;
+                var buf3: [32]u8 = undefined;
 
-                const fmt_slice = try std.fmt.bufPrint(&buf, "{s} {s}, {s}", .{
-                    self.op_code.to_str(),
-                    self.operands[0].register.to_str(),
-                    self.operands[1].register.to_str(),
-                });
+                const fmt_slice = try std.fmt.bufPrint(
+                    &buf,
+                    "mov {s}, {s}\n",
+                    .{ switch (self.operands[0]) {
+                        .register => |reg| reg.to_str(),
+                        .memory => |mem| try std.fmt.bufPrint(&buf3, "[{s}{s}{s}]", .{
+                            mem.p1.to_str(),
+                            if (mem.p2) |p2| try std.fmt.bufPrint(&buf2, " + {s}", .{p2.to_str()}) else "",
+                            if (mem.displacement) |d| if (d > 0) try std.fmt.bufPrint(&buf2, " + {d}", .{d}) else "" else "",
+                        }),
+                    }, switch (self.operands[1]) {
+                        .register => |reg| reg.to_str(),
+                        .memory => |mem| try std.fmt.bufPrint(&buf2, "[{s}{s}{s}]", .{
+                            mem.p1.to_str(),
+                            if (mem.p2) |p2| try std.fmt.bufPrint(&buf3, " + {s}", .{p2.to_str()}) else "",
+                            if (mem.displacement) |d| if (d > 0) try std.fmt.bufPrint(&buf3, " + {d}", .{d}) else "" else "",
+                        }),
+                    } },
+                );
 
                 return fmt_slice;
             },
@@ -88,7 +158,11 @@ const Operand = union(enum) {
     register: Register,
     memory: MemoryAddress,
 
-    const MemoryAddress = struct {};
+    const MemoryAddress = struct {
+        displacement: ?u16,
+        p1: Register,
+        p2: ?Register,
+    };
 };
 
 const Register = enum {
@@ -134,18 +208,27 @@ const Register = enum {
 pub fn main() !void {
     const cwd = std.fs.cwd();
     // const file = try cwd.openFile("listing_0037_single_register_mov", .{});
-    const file = try cwd.openFile("listing_0038_many_register_mov", .{});
+    const file = try cwd.openFile("test_destination-3", .{});
     defer file.close();
 
-    var read_buf: [22]u8 = undefined;
+    var read_buf: [5]u8 = undefined;
 
     var buf_reader = std.io.bufferedReader(file.reader());
     const reader = buf_reader.reader();
 
     const num_bytes_read = try reader.read(&read_buf);
 
+    std.debug.print("Buffer read: 0b{b:0>8}, num_bytes_read: {any}\n", .{
+        read_buf,
+        num_bytes_read,
+    });
+
     const first_byte = read_buf[0];
     const first_six_bits = (first_byte >> 2) & 0b111111;
+
+    // testing
+    const first_six_bits_two = (first_byte >> 2) & 0b111101;
+    std.debug.print("first six bits:       0b{b:0>8}\n", .{first_six_bits_two});
 
     const d_bit = (first_byte >> 1) & 0b1;
     std.debug.print("d bit:       0b{b:0>1}\n", .{d_bit});
@@ -157,13 +240,22 @@ pub fn main() !void {
     const mod_bits = (second_byte >> 6) & 0b11;
     std.debug.print("mod bits:       0b{b:0>2}\n", .{mod_bits});
 
-    const bits: u6 = @intCast(first_six_bits);
-    const op_code = Instruction.OpCode.from_binary(bits);
+    const op_code = Instruction.OpCode.from_binary(first_six_bits);
 
     var instruction = Instruction{
+        .mneumonic = undefined,
         .op_code = op_code,
         .operands = undefined,
     };
+
+    switch (op_code) {
+        .reg_rm => {
+            instruction.mneumonic = .mov;
+        },
+        else => {
+            instruction.mneumonic = .none;
+        },
+    }
 
     const reg_register_bits = (second_byte >> 3) & 0b111;
     std.debug.print("reg register bits:       0b{b:0>3}\n", .{reg_register_bits});
@@ -174,10 +266,10 @@ pub fn main() !void {
     switch (mod_bits) {
         0b00000011 => {
             var op_reg = Operand{ .register = undefined };
-            op_reg.register = try Instruction.set_reg_field_encoding(w_bit, reg_register_bits);
+            op_reg.register = try Instruction.from_reg_bits(w_bit, reg_register_bits);
 
             var op_rm = Operand{ .register = undefined };
-            op_rm.register = try Instruction.set_reg_field_encoding(w_bit, rm_register_bits);
+            op_rm.register = try Instruction.from_reg_bits(w_bit, rm_register_bits);
 
             if (d_bit == 0b00000000) {
                 instruction.operands[0] = op_rm;
@@ -187,39 +279,25 @@ pub fn main() !void {
                 instruction.operands[1] = op_rm;
             }
         },
-        0b00000000 => {},
-        0b00000001 => {},
-        0b00000010 => {},
+        0b00000000 => {
+            try instruction.generate_reg_rm_instruct(w_bit, d_bit, reg_register_bits, rm_register_bits, null);
+        },
+        0b00000001 => {
+            try instruction.generate_reg_rm_instruct(w_bit, d_bit, reg_register_bits, rm_register_bits, read_buf[2]);
+        },
+        0b00000010 => {
+            // For 16-bit displacement, combine low byte and high byte
+            const displacement: u16 = (@as(u16, read_buf[3]) << 8) | @as(u16, read_buf[2]);
+            try instruction.generate_reg_rm_instruct(w_bit, d_bit, reg_register_bits, rm_register_bits, displacement);
+        },
         else => return error.UnknownModEncoding,
     }
 
-    std.debug.print("Buffer read: {b}, num_bytes_read: {any}\n", .{
-        read_buf,
-        num_bytes_read,
-    });
+    const writer = std.io.getStdOut().writer();
+    const formatted_instr = try instruction.format();
+    _ = try writer.write(formatted_instr);
 
-    std.debug.print("Instruction: {s}\n", .{try instruction.format()});
-    // character encoding for asm instruction looks unreadable - not sure how to fix
-    // const write_file = try cwd.createFile("mov_single_register.asm", .{ .read = true });
-    // defer write_file.close();
-
-    // var buf_writer = std.io.bufferedWriter(write_file.writer());
-    // const writer = buf_writer.writer();
-    //
-    // const writer = write_file.writer();
-
-    // var fmt_instruction_buf: [100]u8 = undefined;
-    //
-    // const fmt_slice = try std.fmt.bufPrint(&fmt_instruction_buf, "{s}\n", .{try instruction.format()});
-
-    // try writer.writeAll("bits 16\n");
-    // try writer.writeAll(fmt_slice);
-
-    // try buf_writer.flush();
-
-    // std.debug.print("BufWriter wrikkte - written: {any}\n", .{
-    //     num_bytes_written,
-    // });
+    std.debug.print("Instruction: {s}\n", .{formatted_instr});
 }
 
 test "simple test" {
